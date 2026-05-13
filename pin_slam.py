@@ -5,7 +5,7 @@
 
 import argparse
 import os
-os.environ['CUDA_VISIBLE_DEVICES'] = '0' # by default 0, change it here if you want to use other GPU 
+os.environ['CUDA_VISIBLE_DEVICES'] = '3' # by default 0, change it here if you want to use other GPU 
 import sys
 import time
 import numpy as np

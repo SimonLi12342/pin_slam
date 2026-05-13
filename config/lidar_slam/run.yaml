@@ -3,7 +3,14 @@ setting:
   output_root: "./experiments"
   deskew: True
 process:
-  max_range_m: 80.0 # maximum distance filter for each frame
+  min_range_m: 3.0
+  max_range_m: 80.0
+  vox_down_m: 0.08
+  min_z_m: -3.5
+  dynamic_filter_on: True
+  dynamic_certainty_thre: 1.0
+  dynamic_sdf_ratio_thre: 0.5
+  dynamic_min_grad_norm_thre: 0.25
 sampler:
   surface_sample_range_m: 0.25
 neuralpoints:
@@ -25,4 +32,6 @@ optimizer: # mapper
   adaptive_iters: True
 eval:
   wandb_vis_on: False # log to wandb or not
-  silence_log: True
+  silence_log: False
+  save_map: True
+  save_mesh: True
