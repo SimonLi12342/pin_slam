@@ -40,7 +40,14 @@ try:
     from rosbags.typesys.types import sensor_msgs__msg__PointCloud2 as PointCloud2
     from rosbags.typesys.types import sensor_msgs__msg__PointField as PointField
 except ImportError as e:
-    raise ImportError('rosbags library not installed, run "pip install -U rosbags"') from e
+    try:
+        from rosbags.typesys import Stores, get_typestore
+
+        _TYPESTORE = get_typestore(Stores.LATEST)
+        PointCloud2 = _TYPESTORE.types["sensor_msgs/msg/PointCloud2"]
+        PointField = _TYPESTORE.types["sensor_msgs/msg/PointField"]
+    except ImportError as inner_e:
+        raise ImportError('rosbags library not installed, run "pip install -U rosbags"') from inner_e
 
 
 _DATATYPES = {}

@@ -1,0 +1,68 @@
+setting:
+  name: "test_pin_slnr"
+  output_root: "./experiments"
+  deskew: True
+
+process:
+  max_range_m: 80.0
+  dynamic_filter_on: False
+
+sampler:
+  surface_sample_range_m: 0.25
+
+neuralpoints:
+  voxel_size_m: 0.4
+  query_nn_k: 6
+  search_alpha: 0.5
+  weighted_first: False
+
+tracker:
+  source_vox_down_m: 0.6
+  iter_n: 50
+  valid_nn_k: 5
+
+pgo:
+  map_context: True
+  context_cosdist: 0.3
+  loop_with_feature: False
+
+optimizer:
+  batch_size: 10000
+  adaptive_iters: False
+  iters: 12
+  init_iter_ratio: 10
+  learning_rate: 0.01
+  ba_freq_frame: 0
+
+eval:
+  wandb_vis_on: False
+  silence_log: True
+
+slnr:
+  warmup_frames: 1
+  hash_voxel_size: 0.4
+  hash_table_size: 524288
+  hash_insert_down_voxel_size: 0.1
+  local_sdf_resolution: 0.1
+  query_nn_k: 6
+  gss_vox_size: 0.4
+  hidden_dim: 64
+  num_layers: 2
+  learning_rate: 0.005
+  lr_ratio: 0.1
+  train_frames_per_step: 1
+  train_points_per_frame: 4096
+  min_points_per_frame: 256
+  n_rays: 512
+  n_max_interset: 10
+  n_surf_samples: 12
+  sur_behind_dis: 0.3
+  s_dev: 0.25
+  step_size_sdf: 0.03
+  trunc_distance: 0.25
+  trunc_weight: 1.0
+  recent_buffer_size: 30
+  replay_buffer_size: 120
+  replay_insert_interval: 5
+  train_recent_ratio: 0.7
+  enable_densify: false
