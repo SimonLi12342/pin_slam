@@ -70,6 +70,8 @@ class NeuralPointsSLNR(nn.Module):
 
         self.cur_memory_mb = 0.0
         self.memory_footprint = []
+        self.dynamic_support_votes = torch.empty((0,), device=self.device, dtype=self.dtype)
+        self.dynamic_observation_votes = torch.empty((0,), device=self.device, dtype=self.dtype)
 
         self.sync_from_backend()
 
@@ -121,11 +123,15 @@ class NeuralPointsSLNR(nn.Module):
             self.point_ts_create = torch.empty((0,), device=self.device, dtype=torch.int)
             self.point_ts_update = torch.empty((0,), device=self.device, dtype=torch.int)
             self.point_certainties = torch.empty((0,), device=self.device, dtype=self.dtype)
+            self.dynamic_support_votes = torch.empty((0,), device=self.device, dtype=self.dtype)
+            self.dynamic_observation_votes = torch.empty((0,), device=self.device, dtype=self.dtype)
             self.reset_local_map(torch.zeros(3, device=self.device, dtype=self.dtype), None, self.cur_ts)
             return
 
         old_certainty = self.point_certainties
         old_update_ts = self.point_ts_update
+        old_dynamic_support = self.dynamic_support_votes
+        old_dynamic_observation = self.dynamic_observation_votes
 
         self.neural_points = local_sdfs.positions
         self.point_orientations = self._rotvec_to_quat(local_sdfs.rotations)
@@ -153,6 +159,30 @@ class NeuralPointsSLNR(nn.Module):
             self.point_certainties = torch.cat((old_certainty.to(self.device), appended), dim=0)
         else:
             self.point_certainties = old_certainty[: anchor_ts.shape[0]].to(self.device)
+
+        if old_dynamic_support.shape[0] == anchor_ts.shape[0]:
+            self.dynamic_support_votes = old_dynamic_support.to(self.device)
+        elif old_dynamic_support.shape[0] < anchor_ts.shape[0]:
+            appended = torch.zeros(
+                (anchor_ts.shape[0] - old_dynamic_support.shape[0],),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            self.dynamic_support_votes = torch.cat((old_dynamic_support.to(self.device), appended), dim=0)
+        else:
+            self.dynamic_support_votes = old_dynamic_support[: anchor_ts.shape[0]].to(self.device)
+
+        if old_dynamic_observation.shape[0] == anchor_ts.shape[0]:
+            self.dynamic_observation_votes = old_dynamic_observation.to(self.device)
+        elif old_dynamic_observation.shape[0] < anchor_ts.shape[0]:
+            appended = torch.zeros(
+                (anchor_ts.shape[0] - old_dynamic_observation.shape[0],),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            self.dynamic_observation_votes = torch.cat((old_dynamic_observation.to(self.device), appended), dim=0)
+        else:
+            self.dynamic_observation_votes = old_dynamic_observation[: anchor_ts.shape[0]].to(self.device)
 
         if self.local_mask is not None and self.local_mask.shape[0] == self.count() + 1:
             self.reset_local_map(
@@ -379,7 +409,156 @@ class NeuralPointsSLNR(nn.Module):
         return geo_feature, None, weight_knn.unsqueeze(-1), nn_counts, queried_certainty
 
     def prune_map(self, prune_certainty_thre, min_prune_count=500, global_prune=False):
-        return False
+        local_sdfs = self.backend.local_sdfs
+        optimizer = self.backend.optimizer
+        if local_sdfs is None or optimizer is None or self.count() == 0:
+            return False
+
+        positions = local_sdfs.positions.detach().cpu().numpy()
+        point_count = positions.shape[0]
+        if point_count < 64:
+            return False
+
+        cluster_voxel = max(float(self.backend.hash_voxel_size), float(self.resolution) * 4.0)
+        quantized = np.floor(positions / cluster_voxel).astype(np.int64)
+
+        voxel_to_indices = {}
+        for idx, key_arr in enumerate(quantized):
+            key = (int(key_arr[0]), int(key_arr[1]), int(key_arr[2]))
+            voxel_to_indices.setdefault(key, []).append(idx)
+
+        if len(voxel_to_indices) <= 1:
+            return False
+
+        neighbor_offsets = [
+            (dx, dy, dz)
+            for dx in (-1, 0, 1)
+            for dy in (-1, 0, 1)
+            for dz in (-1, 0, 1)
+        ]
+
+        components = []
+        visited = set()
+        for seed_key in voxel_to_indices:
+            if seed_key in visited:
+                continue
+            stack = [seed_key]
+            visited.add(seed_key)
+            component_keys = []
+            component_point_count = 0
+            while stack:
+                cur_key = stack.pop()
+                component_keys.append(cur_key)
+                component_point_count += len(voxel_to_indices[cur_key])
+                for dx, dy, dz in neighbor_offsets:
+                    nb_key = (cur_key[0] + dx, cur_key[1] + dy, cur_key[2] + dz)
+                    if nb_key in voxel_to_indices and nb_key not in visited:
+                        visited.add(nb_key)
+                        stack.append(nb_key)
+            components.append((component_point_count, component_keys))
+
+        if len(components) <= 1:
+            return False
+
+        components.sort(key=lambda item: item[0], reverse=True)
+        kept_voxels = set(components[0][1])
+
+        keep_mask_np = np.zeros((point_count,), dtype=bool)
+        for key in kept_voxels:
+            keep_mask_np[voxel_to_indices[key]] = True
+
+        prune_mask_np = ~keep_mask_np
+        prune_count = int(prune_mask_np.sum())
+        if prune_count == 0:
+            return False
+
+        if not self.silence:
+            kept_count = point_count - prune_count
+            print(
+                f"# Prune SLNR isolated anchors: {prune_count} "
+                f"(kept {kept_count}/{point_count})"
+            )
+
+        prune_mask = torch.from_numpy(prune_mask_np).to(self.device, dtype=torch.bool)
+        keep_mask = ~prune_mask
+
+        local_sdfs.prune_optimizer(prune_mask, optimizer)
+        self.backend.anchor_frame_ids = self.backend.anchor_frame_ids[keep_mask]
+        self.point_ts_create = self.point_ts_create[keep_mask]
+        self.point_ts_update = self.point_ts_update[keep_mask]
+        self.point_certainties = self.point_certainties[keep_mask]
+
+        self.backend.rebuild_anchor_voxel_keys()
+        self.backend.rebuild_svh_from_anchors()
+        self.sync_from_backend()
+        return True
+
+    def accumulate_dynamic_evidence(self, dynamic_points_world: torch.Tensor) -> int:
+        if dynamic_points_world is None or dynamic_points_world.numel() == 0 or self.count() == 0:
+            return 0
+
+        _, weight_knn, nn_counts, _, global_neighbor_idx, valid_mask = self._query_core(
+            dynamic_points_world,
+            query_locally=False,
+        )
+        if valid_mask.numel() == 0 or not valid_mask.any():
+            return 0
+
+        safe_idx = global_neighbor_idx[valid_mask]
+        safe_weight = weight_knn[valid_mask]
+        self.dynamic_support_votes.scatter_add_(0, safe_idx, safe_weight.to(self.dynamic_support_votes.dtype))
+
+        observed_anchor_mask = torch.zeros((self.count(),), device=self.device, dtype=torch.bool)
+        observed_anchor_mask[safe_idx] = True
+        self.dynamic_observation_votes[observed_anchor_mask] += 1.0
+        return int(observed_anchor_mask.sum().item())
+
+    def prune_dynamic_anchors(
+        self,
+        min_observation_votes: float = 8.0,
+        dynamic_ratio_thre: float = 0.6,
+        min_anchor_count: int = 128,
+    ) -> int:
+        local_sdfs = self.backend.local_sdfs
+        optimizer = self.backend.optimizer
+        if local_sdfs is None or optimizer is None or self.count() < min_anchor_count:
+            return 0
+        if self.dynamic_observation_votes.shape[0] != self.count():
+            return 0
+
+        obs_votes = self.dynamic_observation_votes
+        support_votes = self.dynamic_support_votes
+        valid_obs_mask = obs_votes >= float(min_observation_votes)
+        if not valid_obs_mask.any():
+            return 0
+
+        dynamic_ratio = torch.zeros_like(obs_votes)
+        dynamic_ratio[valid_obs_mask] = support_votes[valid_obs_mask] / (obs_votes[valid_obs_mask] + 1e-6)
+        prune_mask = valid_obs_mask & (dynamic_ratio >= float(dynamic_ratio_thre))
+        prune_count = int(prune_mask.sum().item())
+        if prune_count == 0:
+            return 0
+
+        keep_mask = ~prune_mask
+        local_sdfs.prune_optimizer(prune_mask, optimizer)
+        self.backend.anchor_frame_ids = self.backend.anchor_frame_ids[keep_mask]
+        self.point_ts_create = self.point_ts_create[keep_mask]
+        self.point_ts_update = self.point_ts_update[keep_mask]
+        self.point_certainties = self.point_certainties[keep_mask]
+        self.dynamic_support_votes = self.dynamic_support_votes[keep_mask]
+        self.dynamic_observation_votes = self.dynamic_observation_votes[keep_mask]
+
+        if not self.silence:
+            kept_count = int(keep_mask.sum().item())
+            print(
+                f"# Prune SLNR dynamic anchors: {prune_count} "
+                f"(kept {kept_count}/{prune_count + kept_count})"
+            )
+
+        self.backend.rebuild_anchor_voxel_keys()
+        self.backend.rebuild_svh_from_anchors()
+        self.sync_from_backend()
+        return prune_count
 
     def adjust_map(self, pose_diff_torch):
         if self.is_empty():

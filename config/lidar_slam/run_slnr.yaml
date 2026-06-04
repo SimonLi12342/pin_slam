@@ -5,10 +5,14 @@ setting:
 
 process:
   max_range_m: 80.0
-  dynamic_filter_on: False
+  dynamic_filter_on: True
+  dynamic_certainty_thre: 0.2
+  dynamic_sdf_ratio_thre: 0.2
+  dynamic_min_grad_norm_thre: 0.6
 
 sampler:
   surface_sample_range_m: 0.25
+  free_front_sample_n: 4
 
 neuralpoints:
   voxel_size_m: 0.4
@@ -66,3 +70,6 @@ slnr:
   replay_insert_interval: 5
   train_recent_ratio: 0.7
   enable_densify: false
+  dynamic_prune_min_votes: 4
+  dynamic_prune_ratio_thre: 0.45
+  dynamic_prune_min_dynamic_points: 64

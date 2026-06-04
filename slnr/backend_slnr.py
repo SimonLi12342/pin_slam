@@ -361,7 +361,22 @@ class SLNRMapBackend(nn.Module):
 
     def rebuild_svh_from_anchors(self) -> None:
         self.svh = torch.classes.svh.HashTable(self.hash_voxel_size, self.ht_size)
-        if self.local_sdfs is not None and self.local_sdfs.positions.shape[0] > 0:
+        rebuilt = False
+
+        # Preserve the SLNR sparse-hash semantics when the hash needs to be
+        # recreated inside the PIN-SLAM control flow. The original SLNR `ht_info`
+        # represents occupied support voxels, not anchor-center voxels.
+        if self.ht_info_cpu is not None:
+            vox_coords = self.ht_info_cpu[:, :3]
+            valid_mask = vox_coords[:, 0] != self.inval_val
+            valid_voxels = vox_coords[valid_mask]
+            if valid_voxels.numel() > 0:
+                vox_centers = (valid_voxels + 0.5) * self.hash_voxel_size
+                self.svh.insert(vox_centers.float())
+                rebuilt = True
+
+        if (not rebuilt) and self.local_sdfs is not None and self.local_sdfs.positions.shape[0] > 0:
+            # Fallback for paths where no SLNR hash state has been initialized yet.
             self.svh.insert(self.local_sdfs.positions.detach().cpu().float())
         self.refresh_hash_state()
 
@@ -378,6 +393,13 @@ class SLNRMapBackend(nn.Module):
         if len(frames) < n_total:
             frames.extend(sample_items(list(self.recent_frames), n_total - len(frames), self.rng))
         return frames[:n_total]
+
+    def reset_runtime_buffers(self) -> None:
+        self.recent_frames.clear()
+        self.replay_frames.clear()
+        if not self.initialized:
+            self.warmup_raw_frames.clear()
+            self.warmup_processed_frames.clear()
 
     def optimize_step(self) -> None:
         if not self.initialized or self.neural_map is None or self.optimizer is None:

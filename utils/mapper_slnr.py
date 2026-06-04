@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import math
 from collections import deque
 
 import matplotlib.cm as cm
@@ -36,13 +35,9 @@ class Mapper:
         self.color_mlp = decoders["color"]
         self.device = config.device
         self.dtype = config.dtype
-        self.used_poses = None
         self.total_iter = 0
-        self.cur_new_point_ratio = 0.0
-        self.cur_sample_count = 0
-        self.pool_sample_count = 0
-        self.ba_done_flag = False
         self._ba_warned = False
+        self.keep_vis_pool = bool(config.o3d_vis_on)
         self.pool_frame_limit = max(4, int(self.neural_points.backend.recent_buffer_size))
         self.init_pool()
 
@@ -51,71 +46,30 @@ class Mapper:
         self.pool_sdf = deque(maxlen=self.pool_frame_limit)
         self.pool_frame_ids = deque(maxlen=self.pool_frame_limit)
 
-    def determine_used_pose(self):
-        cur_frame = self.dataset.processed_frame
-        if self.config.pgo_on:
-            self.used_poses = torch.tensor(
-                self.dataset.pgo_poses[: cur_frame + 1],
-                device=self.device,
-                dtype=torch.float64,
-            )
-        elif self.config.track_on:
-            self.used_poses = torch.tensor(
-                self.dataset.odom_poses[: cur_frame + 1],
-                device=self.device,
-                dtype=torch.float64,
-            )
-        elif self.dataset.gt_pose_provided:
-            self.used_poses = torch.tensor(
-                self.dataset.gt_poses[: cur_frame + 1],
-                device=self.device,
-                dtype=torch.float64,
-            )
-
     def process_frame(
         self,
         point_cloud_torch: torch.Tensor,
-        frame_label_torch: torch.Tensor,
         cur_pose_torch: torch.Tensor,
         frame_id: int,
-        filter_dynamic: bool = False,
     ):
-        self.dataset.static_mask = torch.ones(
-            point_cloud_torch.shape[0],
-            dtype=torch.bool,
-            device=self.device,
-        )
-        if filter_dynamic and not self.silence:
-            print("Dynamic filtering is disabled in the SLNR mapping integration path.")
-
-        anchor_count_before = self.neural_points.count()
-
         points_local = point_cloud_torch[:, :3].detach().cpu().numpy().astype(np.float32)
         pose_wc = cur_pose_torch.detach().cpu().numpy().astype(np.float32)
         processed = self.neural_points.backend.ingest_frame(points_local, pose_wc, frame_id)
 
         self.neural_points.sync_from_backend()
-        self.determine_used_pose()
         self.neural_points.reset_local_map(cur_pose_torch[:3, 3], cur_pose_torch[:3, :3], frame_id, reboot_map=True)
 
-        anchor_count_after = self.neural_points.count()
-        if anchor_count_before > 0:
-            self.cur_new_point_ratio = max(0.0, float(anchor_count_after - anchor_count_before) / float(anchor_count_before))
-        else:
-            self.cur_new_point_ratio = 1.0 if anchor_count_after > 0 else 0.0
-
-        if processed is not None:
+        if self.keep_vis_pool and processed is not None:
             pooled_points = torch.from_numpy(processed.train_points_world).to(self.device, dtype=self.dtype)
             pooled_sdf = torch.zeros((pooled_points.shape[0],), device=self.device, dtype=self.dtype)
             self.pool_points.append(pooled_points)
             self.pool_sdf.append(pooled_sdf)
             self.pool_frame_ids.append(int(frame_id))
-            self.cur_sample_count = pooled_points.shape[0]
-        else:
-            self.cur_sample_count = 0
-
-        self.pool_sample_count = int(sum(points.shape[0] for points in self.pool_points))
         self.neural_points.record_memory(verbose=(not self.silence))
+
+    def reset_runtime_state(self):
+        self.init_pool()
+        self.neural_points.backend.reset_runtime_buffers()
 
     def mapping(self, iter_count):
         iter_count = max(1, int(iter_count))
@@ -153,6 +107,8 @@ class Mapper:
             )
 
     def get_data_pool_o3d(self, down_rate=1, only_cur_data=False):
+        if not self.keep_vis_pool:
+            return None
         if len(self.pool_points) == 0:
             return None
 

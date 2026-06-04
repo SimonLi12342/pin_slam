@@ -146,6 +146,22 @@ class _gs_searching(Function):
         gs_center = positions[inside_mask]
         gs_rotvec = rotations[inside_mask]
         gs_scale =  gs_scales[inside_mask]
+
+        if gs_center.shape[0] == 0:
+            empty_idx = torch.full(
+                (query_points.shape[0], query_nn_k),
+                -1,
+                device=query_points.device,
+                dtype=torch.int32,
+            )
+            empty_neighb = torch.zeros(
+                (query_points.shape[0], query_nn_k, 3),
+                device=query_points.device,
+                dtype=query_points.dtype,
+            )
+            ctx.save_for_backward(query_points, positions, rotations, scalings, empty_idx, inside_mask)
+            ctx.dims = [positions.shape[0]]
+            return empty_neighb, empty_idx, inside_mask
         
         query_points = query_points.contiguous()
         neiber_dis2, neiber_idx = gs_search_global.find_neibors(query_points, gs_center, gs_rotvec, gs_scale, bounding_min, bounding_max, gss_vox_size, 32)

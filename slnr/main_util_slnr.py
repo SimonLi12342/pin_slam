@@ -10,7 +10,6 @@ except ImportError:
     import skimage.measure as skimage_measure
 import open3d as o3d
 from tqdm import *
-
 from . import network_slnr as network
 
 def expand_data(batch, data, replace=False):
@@ -637,6 +636,8 @@ def create_mesh_svh(ht_info, vox_size, neural_map, grid_res, chunk_size, mesh_mi
     vox_coords = ht_info[:, :3]
     inval_val = 999999    #无效坐标值，与c++类中对应
     vox_coords = vox_coords[vox_coords[:, 0] != inval_val]
+    if vox_coords.numel() == 0:
+        return None
     vox_center = (vox_coords+0.5) * vox_size    #得到体素中心坐标
     
     vox_coords_min, _ = vox_coords.min(dim = 0)
@@ -746,9 +747,14 @@ def create_mesh_svh(ht_info, vox_size, neural_map, grid_res, chunk_size, mesh_mi
     for i in range(n_voxel_total):
         sdf_volume = sdf_grid[i].numpy()
         mc_mask = mc_mask_grid[i].numpy()
-        #已在模块内部进行了修改，若提取不到mesh，则返回None
-        verts, faces, _, _ = skimage_measure.marching_cubes(sdf_volume, 0, spacing=spacing, mask=mc_mask)   
-        if verts is None:
+        if not mc_mask.any():
+            continue
+        sdf_valid = sdf_volume[mc_mask]
+        if sdf_valid.size == 0 or sdf_valid.min() > 0.0 or sdf_valid.max() < 0.0:
+            continue
+        try:
+            verts, faces, _, _ = skimage_measure.marching_cubes(sdf_volume, 0, spacing=spacing, mask=mc_mask)
+        except (RuntimeError, ValueError):
             continue
         verts -= 0.5
         verts *= vox_size
@@ -757,7 +763,10 @@ def create_mesh_svh(ht_info, vox_size, neural_map, grid_res, chunk_size, mesh_mi
         num_verts += verts.shape[0]
         total_verts += [verts]
         total_faces += [faces]
-        
+    
+    if len(total_verts) == 0 or len(total_faces) == 0:
+        return None
+
     total_verts = np.concatenate(total_verts)
     total_faces = np.concatenate(total_faces)
     
